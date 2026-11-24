@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
 OLX Watcher Bot — следит за объявлениями по ключевым словам и шлёт
-подозрительно дешёвые лоты в Telegram.
-
-Запускается периодически через GitHub Actions (по расписанию), а не
-крутится постоянно — так это бесплатно.
+подозрительно дешёвые (относительно рынка) лоты в Telegram.
 """
 
 import json
 import os
+import time
 import re
+import statistics
 import requests
 from bs4 import BeautifulSoup
 
@@ -22,14 +21,14 @@ WATCHES = [
     {
         "name": "Наушники",
         "url": "https://www.olx.ua/uk/list/q-navushniki/",
-        "max_price": 500,
         "min_price": 50,
+        "discount_ratio": 0.6,    # алертим, если цена <= 60% от медианной цены по категории
     },
     {
         "name": "Повербанки",
         "url": "https://www.olx.ua/uk/list/q-powerbank/",
-        "max_price": 400,
         "min_price": 50,
+        "discount_ratio": 0.6,
     },
 ]
 
@@ -41,12 +40,31 @@ SEEN_FILE = "seen_listings.json"
 def send_telegram_message(text: str) -> None:
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": False}
-    try:
-        r = requests.post(url, data=payload, timeout=15)
-        if not r.ok:
-            print(f"[telegram] ошибка отправки: {r.status_code} {r.text}")
-    except requests.RequestException as e:
-        print(f"[telegram] не удалось отправить сообщение: {e}")
+
+    for attempt in range(3):
+        try:
+            r = requests.post(url, data=payload, timeout=15)
+        except requests.RequestException as e:
+            print(f"[telegram] не удалось отправить сообщение: {e}")
+            return
+
+        if r.ok:
+            return
+
+        if r.status_code == 429:
+            retry_after = 5
+            try:
+                retry_after = r.json().get("parameters", {}).get("retry_after", 5)
+            except ValueError:
+                pass
+            print(f"[telegram] лимит запросов, жду {retry_after} сек и пробую снова...")
+            time.sleep(retry_after + 1)
+            continue
+
+        print(f"[telegram] ошибка отправки: {r.status_code} {r.text}")
+        return
+
+    print("[telegram] не удалось отправить сообщение после нескольких попыток")
 
 
 # ========================= ХРАНИЛИЩЕ "УЖЕ ВИДЕЛИ" =========================
@@ -132,6 +150,19 @@ def run_once(seen: set) -> set:
         listings = fetch_listings(watch["url"])
         print(f"[{watch['name']}] найдено карточек: {len(listings)}")
 
+        valid_prices = [
+            item["price"] for item in listings
+            if item["price"] >= watch["min_price"]
+        ]
+
+        if len(valid_prices) < 5:
+            print(f"[{watch['name']}] слишком мало объявлений для анализа цены, пропускаю")
+            continue
+
+        median_price = statistics.median(valid_prices)
+        threshold = median_price * watch["discount_ratio"]
+        print(f"[{watch['name']}] медианная цена: {median_price:.0f} грн, порог алерта: {threshold:.0f} грн")
+
         for item in listings:
             lid = make_listing_id(watch["name"], item["link"])
             if lid in seen:
@@ -139,15 +170,17 @@ def run_once(seen: set) -> set:
             seen.add(lid)
 
             price = item["price"]
-            if watch["min_price"] <= price <= watch["max_price"]:
+            if watch["min_price"] <= price <= threshold:
+                discount_pct = round((1 - price / median_price) * 100)
                 text = (
-                    f"🔥 <b>{watch['name']}</b>\n"
+                    f"🔥 <b>{watch['name']}</b> — дешевле рынка на {discount_pct}%\n"
                     f"{item['title']}\n"
-                    f"Цена: {int(price)} грн\n"
+                    f"Цена: {int(price)} грн (медиана по категории: {median_price:.0f} грн)\n"
                     f"{item['link']}"
                 )
                 send_telegram_message(text)
-                print(f"[alert] отправлено: {item['title']} — {price} грн")
+                print(f"[alert] отправлено: {item['title']} — {price} грн (-{discount_pct}%)")
+                time.sleep(1.5)
 
     return seen
 
