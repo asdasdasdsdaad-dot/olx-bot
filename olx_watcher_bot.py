@@ -2,11 +2,13 @@
 """
 OLX Watcher Bot — следит за объявлениями по ключевым словам и шлёт
 подозрительно дешёвые лоты в Telegram.
+
+Запускается периодически через GitHub Actions (по расписанию), а не
+крутится постоянно — так это бесплатно.
 """
 
 import json
 import os
-import time
 import re
 import requests
 from bs4 import BeautifulSoup
@@ -31,7 +33,6 @@ WATCHES = [
     },
 ]
 
-CHECK_INTERVAL_SECONDS = 300
 SEEN_FILE = "seen_listings.json"
 
 # ========================= TELEGRAM =========================
@@ -153,17 +154,14 @@ def run_once(seen: set) -> set:
 
 def main() -> None:
     if not BOT_TOKEN or not CHAT_ID:
-        print("Не заданы BOT_TOKEN и/или CHAT_ID. Задай их как переменные окружения.")
+        print("Не заданы BOT_TOKEN и/или CHAT_ID. Задай их как переменные окружения (GitHub Secrets).")
         return
 
     seen = load_seen()
-    print("Бот запущен. Проверяю объявления...")
-
-    while True:
-        seen = run_once(seen)
-        save_seen(seen)
-        print(f"Жду {CHECK_INTERVAL_SECONDS} секунд до следующей проверки...\n")
-        time.sleep(CHECK_INTERVAL_SECONDS)
+    print("Проверяю объявления...")
+    seen = run_once(seen)
+    save_seen(seen)
+    print("Готово.")
 
 
 if __name__ == "__main__":
